@@ -95,6 +95,7 @@ public:
     virtual void recomputeBOWs(Prob minBackoffMass = -1.0);
     virtual void pruneProbs(double threshold, unsigned minorder = 2,
 							LM *historyLM = 0);
+    virtual double getPruneThreshold(long long size, unsigned minorder = 2);
     virtual void pruneLowProbs(unsigned minorder = 2);
     virtual void rescoreProbs(LM &lm);
 

@@ -20,6 +20,7 @@ using namespace std;
 #include <stdlib.h>
 #include <math.h>
 #include <errno.h>
+#include <queue>
 #if !defined(_MSC_VER) && !defined(WIN32)
 #include <sys/param.h>
 #endif
@@ -2321,6 +2322,111 @@ Ngram::recomputeBOWs(Prob minBackoffMass)
     }
 }
 
+/*
+*	sdli2 2019/04/27
+*   增加计算给定模型size的裁剪的阈值
+*/
+double 
+Ngram::getPruneThreshold(long long size, unsigned minorder)
+{
+
+    double eplison,threshold;
+    eplison = threshold= 1e-16;
+    makeArray(VocabIndex, wordPlusContext, order + 2);
+    VocabIndex *context = &wordPlusContext[1];
+    std::priority_queue<double, vector<double>, greater<double> > perpChangesTopK;
+    long long prune_size,reserve_size = 2;
+    for (unsigned i = 0; i <= minorder - 1; i++)
+	{
+		BOnode *node;
+		NgramBOsIter iter1(*this, context, i);
+		reserve_size ++;
+		while ((node = iter1.next()))
+		{
+			reserve_size ++;
+		}
+    }
+    
+    prune_size = size - reserve_size;
+    for (unsigned i = order - 1; i > 0 && i >= minorder - 1; i--) 
+	{
+		BOnode *node;
+		NgramBOsIter iter1(*this, context, i);
+		while ((node = iter1.next())) 
+		{
+			LogP bow = node->bow;	/* old backoff weight, BOW(h) */
+			double numerator, denominator;
+			/* 
+				* Compute numerator and denominator of the backoff weight,
+				* so that we can quickly compute the BOW adjustment due to
+				* leaving out one prob.
+				*/
+			if (!computeBOW(node, context, i, numerator, denominator)) {
+			continue;
+			}
+			/*
+				* Compute the marginal probability of the context, P(h)
+				* If a historyLM was given (e.g., for KN smoothed LMs), use it,
+				* otherwise use the LM to be pruned.
+				*/
+			LogP cProb = contextProb(context, i);
+			NgramProbsIter piter(*node);
+			VocabIndex word;
+			LogP *ngramProb;
+
+			Boolean allPruned = true;
+
+			while ((ngramProb = piter.next(word))) 
+			{
+				/*
+					* lower-order estimate for ngramProb, P(w|h')
+					*/
+				LogP backoffProb = wordProbBO(word, context, i - 1);
+
+				/*
+					* Compute BOW after removing ngram, BOW'(h)
+					*/
+				LogP newBOW =
+					ProbToLogP(numerator + LogPtoProb(*ngramProb)) -
+					ProbToLogP(denominator + LogPtoProb(backoffProb));
+
+				/*
+					* Compute change in entropy due to removal of ngram
+					* deltaH = - P(H) x
+					*  {P(W | H) [log P(w|h') + log BOW'(h) - log P(w|h)] +
+					*   (1 - \sum_{v,h ngrams} P(v|h)) [log BOW'(h) - log BOW(h)]}
+					*
+					* (1-\sum_{v,h ngrams}) is the probability mass left over from
+					* ngrams of the current order, and is the same as the 
+					* numerator in BOW(h).
+					*/
+				LogP deltaProb = backoffProb + newBOW - *ngramProb;
+				Prob deltaEntropy = - LogPtoProb(cProb) *(LogPtoProb(*ngramProb) * deltaProb +numerator * (newBOW - bow));
+				/*
+					* compute relative change in model (training set) perplexity
+					*	(PPL' - PPL)/PPL = PPL'/PPL - 1
+					*	                 = exp(H')/exp(H) - 1
+					*	                 = exp(H' - H) - 1
+					*/
+				double perpChange = LogPtoProb(deltaEntropy) - 1.0;
+				if(perpChangesTopK.size() < prune_size)
+				{
+					perpChangesTopK.push(perpChange);
+				}else
+				{
+					if(perpChangesTopK.top()<perpChange)
+					{
+						perpChangesTopK.pop();
+						perpChangesTopK.push(perpChange);
+					}
+				}
+			}
+		}
+	}
+	threshold = perpChangesTopK.top();
+	cerr << "Find best threshold "<<threshold << endl;
+	return threshold;
+}
 /*
  * Prune probabilities from model so that the change in training set perplexity
  * is below a threshold.
